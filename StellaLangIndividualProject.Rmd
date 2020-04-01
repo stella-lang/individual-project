@@ -1,0 +1,805 @@
+---
+title: "Individual Project"
+author: "Stella Lang"
+output: html_document
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(biganalytics)
+library(foreach)
+library(ggplot2)
+library(reshape2)
+```
+
+## Q1
+
+**(1)**
+The number of flights for each year in  the 2000s is listed below. To better visualize the trend, I plot it chronologically.
+
+```{r, echo=FALSE}
+# Set working directory to the directory containing the AirlineDelays data.
+setwd("~/Stat480/RDataScience/AirlineDelays")
+
+
+# Now we create a big matrix.
+# m = read.big.matrix("AirlineData2000s.csv", header = TRUE, 
+#                      backingfile = "air2000.bin",
+#                      descriptorfile = "air2000.desc",
+#                      type = "integer", extraCols = "age")
+
+x = attach.big.matrix("air2000.desc")
+
+yearCount = foreach(i = 2000:2008, .combine=c) %do% {
+  sum(x[,"Year"] == i)
+}
+
+knitr::kable(data.frame(year = 2000:2008, yearCount), col.names = c("Year", "Number of flights"), full_width = FALSE)
+plot(2000:2008, yearCount, xlab = "Year", ylab = "Number of flights", type = "b", col = "darkorange")
+```
+
+The plot shows that in general, the number of flights increases over time in the 2000s although there are two drops/decreases in year 2002 and 2008.
+
+The annual cancellation rates by year are shown below. Again, plot it chronologically to see the general trend. 
+
+```{r, echo=FALSE}
+annualCancelRate = foreach(i = 2000:2008, .combine=c) %do% {
+  100*sum(x[x[,"Year"] == i, "Cancelled"])/sum(x[,"Year"] == i)
+}
+
+knitr::kable(data.frame(year = 2000:2008, annualCancelRate), col.names = c("Year", "Annual Cancel Rates"), full_width = FALSE)
+plot(2000:2008, annualCancelRate, xlab = "Year", ylab = "Percent of flights cancelled", type = "b", col = "darkorange")
+```
+
+From the plot, we can see that generally cancellation rates increase over time from year 2002 to 2008. Cancellation rates first increase from year 2000 to 2001 and then drop greatly in 2002. After 2002, the rates increase slowly over time.
+
+For monthly cancellation rates, the results are summarized below. In general, cancellation rates increase during winter (December, January, Feburuary) and summer (May, June, July) and decrease during other months. Notice that years with relatively high monthly cancellation rates also have high annual cancellation rates. In addition, there is an anomaly in September, 2001, which has quite high cancellation rate (around 20%). It might due to the 911 attack happened in America.
+
+```{r, echo=FALSE}
+monthlyCancelRate = foreach(i = 2000:2008, .combine=c) %do% {
+  year = x[x[,"Year"] == i, ]
+  foreach(j = 1:12, .combine = c) %do% {
+    100*sum(year[year[,"Month"] == j, "Cancelled"])/sum(year[,"Month"] == j)
+  }
+}
+
+# convert the results into a nice data frame
+mylist = matrix(monthlyCancelRate, nrow = 12, ncol = 9)
+result = as.data.frame(mylist)
+colnames(result) = as.character(2000:2008)
+result$month = 1:12
+knitr::kable(result, full_width = FALSE, booktabs = TRUE)
+df = melt(result,  id.vars = 'month', variable.name = 'year')
+
+# plot on same grid, each series colored differently 
+ggplot(df, aes(month,value)) + geom_line(aes(colour = year)) + geom_point(aes(colour = year), alpha = 0.5) + ylab("Monthly Cancellation Rates") + xlab("Month") + scale_x_continuous(breaks = seq(1, 12))
+```
+
+
+**(2)**
+To analyze the relationship between cancellation rates and time, fit a simple linear regression with full data (from 2000 to 2008). From the summary we can see that p-values for intercept and coefficient are both greater than 0.05, which indicates that the model might not be a good fit. R square for this model is 0.2416, which means that 24.16% of variation in cancellation rate can be explained by time. This might due to non-constant variance for the data from 2000 to 2008. A linear model is problematic for the span of 2000 to 2008. Therefore, we exclude the data from 2000 to 2001 and fit another simple linear regression model for the span of 2002 to 2008.
+
+```{r,echo=FALSE}
+# include all data from 2000 to 2008
+annualRates = data.frame(rate = annualCancelRate, year = 2000:2008)
+blm = biglm.big.matrix( rate ~ year, data = annualRates)
+summary(blm)
+summary(blm)$rsq
+```
+
+The summary results for this new model shows that p-values for intercept and coefficient are less than 0.05, which indicates a significant linear relationship between annual cancellation rates and time. R square is 0.7267, which means that 72.67% of variation in cancellation rate can be explained by time. Since the coefficient is positive, we can conclude that in general annual cancellation rates increase over time.
+
+```{r, echo=FALSE}
+# exclude data from year 2000 to 2001
+blm2 = biglm.big.matrix(rate ~ year, data = annualRates[-c(1,2),])
+summary(blm2)
+summary(blm2)$rsq
+```
+
+
+## Q2
+
+**(3)**
+For this question, we need calculate the log likelihood ratio statistic based on perCaps and perHtml. To implement this, I modified the two functions (`computeFreqs` and `computeMsgLLR`) from class. Follow the formula  $log(\frac{P(spam|percent)}{P(ham|percent)}) = log(P(percent|spam))-log(P(percent|ham)) + log(P(spam))-log(P(ham))$ where percent denote percent of caps in observed capitalization bin AND percent of HTML in observed HTML bin. Since $log(P(spam))-log(P(ham))$ is constant, we can drop this term. Codes are shown below.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# The following setup code is based on the code for Chapter 3 of 
+# 
+# Nolan, Deborah and Temple Lang, Duncan. Data Science in R: A Case Studies Approach to 
+# Computational Reasoning and Problem Solving. CRC Press, 2015. 
+# http://rdatasciencecases.org/
+
+# and may be useful for the spam detection exercises.
+
+# Set the working directory. This is where R will look for files and save files if a full path is not specified.
+setwd("~/Stat480/RDataScience/Chapter3")
+
+# Load data structures and define variables needed in examples.
+# Following code assumes you have created and stored emailXX.rda in 
+# the ~/Stat480/RDataScience/Chapter3 directory.
+
+load("emailXX.rda")
+indx = c(1:5, 15, 27, 68, 69, 329, 404, 427, 516, 852, 971)
+sampleStruct = emailStruct[ indx ]
+load("spamAssassinDerivedDF.rda")
+
+
+# From section 3.5.3 of the text book.
+library(tm)
+stopWords = stopwords()
+cleanSW = tolower(gsub("[[:punct:]0-9[:blank:]]+", " ", stopWords))
+SWords = unlist(strsplit(cleanSW, "[[:blank:]]+"))
+SWords = SWords[ nchar(SWords) > 1 ]
+stopWords = unique(SWords)
+
+# The following are the testing and training indices from Section 3.6.1.
+# Here we use the isSpam vector from the email data frame.
+# Determine number of spam and ham messages for sampling.
+numEmail = length(emailDF$isSpam)
+numSpam = sum(emailDF$isSpam)
+numHam = numEmail - numSpam
+
+# Set a particular seed, so the results will be reproducible.
+set.seed(418910)
+
+# Take approximately 1/3 of the spam and ham messages as our test spam and ham messages.
+testSpamIdx = sample(numSpam, size = floor(numSpam/3))
+testHamIdx = sample(numHam, size = floor(numHam/3))
+
+testIsSpam = rep(c(TRUE, FALSE), 
+                 c(length(testSpamIdx), length(testHamIdx)))
+trainIsSpam = rep(c(TRUE, FALSE), 
+                  c(numSpam - length(testSpamIdx), 
+                    numHam - length(testHamIdx)))
+
+# Use cleanText and findMsgWords functions from the text to help with processing 
+cleanText =
+  function(msg)   {
+    tolower(gsub("[[:punct:]0-9[:space:][:blank:]]+", " ", msg))
+  }
+
+findMsgWords = 
+  function(msg, stopWords) {
+    if(is.null(msg))
+      return(character())
+    
+    words = unique(unlist(strsplit(cleanText(msg), "[[:blank:]\t]+")))
+    
+    # drop empty and 1 letter words
+    words = words[ nchar(words) > 1]
+    words = words[ !( words %in% stopWords) ]
+    invisible(words)
+  }
+
+
+# Get the message word lists.
+isSpam=sapply(emailStruct, function(xx)xx$isSpam)
+msgWordsList = lapply(emailStruct, 
+                      function(msg){findMsgWords(msg$body, stopWords=stopWords)})
+testMsgWords = c((msgWordsList[isSpam])[testSpamIdx],
+                 (msgWordsList[!isSpam])[testHamIdx] )
+trainMsgWords = c((msgWordsList[isSpam])[ - testSpamIdx], 
+                  (msgWordsList[!isSpam])[ - testHamIdx])
+
+# from section 3.9
+createDerivedDF =
+  function(email = emailStruct, operations = funcList, 
+           verbose = FALSE)
+  {
+    els = lapply(names(operations),
+                 function(id) {
+                   if(verbose) print(id)
+                   e = operations[[id]]
+                   v = if(is.function(e)) 
+                     sapply(email, e)
+                   else 
+                     sapply(email, function(msg) eval(e))
+                   v
+                 })
+    
+    df = as.data.frame(els)
+    names(df) = names(operations)
+    invisible(df)
+  }
+
+funcList = list(
+  isSpam =
+    expression(msg$isSpam)
+  ,
+  isRe =
+    function(msg) {
+      # Can have a Fwd: Re:  ... but we are not looking for this here.
+      # We may want to look at In-Reply-To field.
+      "Subject" %in% names(msg$header) && 
+        length(grep("^[ \t]*Re:", msg$header[["Subject"]])) > 0
+    }
+  ,
+  numLines =
+    function(msg) length(msg$body)
+  ,
+  bodyCharCt =
+    function(msg)
+      sum(nchar(msg$body))
+  ,
+  underscore =
+    function(msg) {
+      if(!"Reply-To" %in% names(msg$header))
+        return(FALSE)
+      
+      txt <- msg$header[["Reply-To"]]
+      length(grep("_", txt)) > 0  && 
+        length(grep("[0-9A-Za-z]+", txt)) > 0
+    }
+  ,
+  subExcCt = 
+    function(msg) {
+      x = msg$header["Subject"]
+      if(is.na(x))
+        return(NA)
+      
+      sum(nchar(gsub("[^!]","", x)))
+    }
+  ,
+  subQuesCt =
+    function(msg) {
+      x = msg$header["Subject"]
+      if(is.na(x))
+        return(NA)
+      
+      sum(nchar(gsub("[^?]","", x)))
+    }
+  ,
+  numAtt = 
+    function(msg) {
+      if (is.null(msg$attach)) return(0)
+      else nrow(msg$attach)
+    }
+  
+  ,
+  priority =
+    function(msg) {
+      ans <- FALSE
+      # Look for names X-Priority, Priority, X-Msmail-Priority
+      # Look for high any where in the value
+      ind = grep("priority", tolower(names(msg$header)))
+      if (length(ind) > 0)  {
+        ans <- length(grep("high", tolower(msg$header[ind]))) >0
+      }
+      ans
+    }
+  ,
+  numRec =
+    function(msg) {
+      # unique or not.
+      els = getMessageRecipients(msg$header)
+      
+      if(length(els) == 0)
+        return(NA)
+      
+      # Split each line by ","  and in each of these elements, look for
+      # the @ sign. This handles
+      tmp = sapply(strsplit(els, ","), function(x) grep("@", x))
+      sum(sapply(tmp, length))
+    }
+  ,
+  perCaps =
+    function(msg)
+    {
+      body = paste(msg$body, collapse = "")
+      
+      # Return NA if the body of the message is "empty"
+      if(length(body) == 0 || nchar(body) == 0) return(NA)
+      
+      # Eliminate non-alpha characters and empty lines 
+      body = gsub("[^[:alpha:]]", "", body)
+      els = unlist(strsplit(body, ""))
+      ctCap = sum(els %in% LETTERS)
+      100 * ctCap / length(els)
+    }
+  ,
+  isInReplyTo =
+    function(msg)
+    {
+      "In-Reply-To" %in% names(msg$header)
+    }
+  ,
+  sortedRec =
+    function(msg)
+    {
+      ids = getMessageRecipients(msg$header)
+      all(sort(ids) == ids)
+    }
+  ,
+  subPunc =
+    function(msg)
+    {
+      if("Subject" %in% names(msg$header)) {
+        el = gsub("['/.:@-]", "", msg$header["Subject"])
+        length(grep("[A-Za-z][[:punct:]]+[A-Za-z]", el)) > 0
+      }
+      else
+        FALSE
+    },
+  hour =
+    function(msg)
+    {
+      date = msg$header["Date"]
+      if ( is.null(date) ) return(NA)
+      # Need to handle that there may be only one digit in the hour
+      locate = regexpr("[0-2]?[0-9]:[0-5][0-9]:[0-5][0-9]", date)
+      
+      if (locate < 0)
+        locate = regexpr("[0-2]?[0-9]:[0-5][0-9]", date)
+      if (locate < 0) return(NA)
+      
+      hour = substring(date, locate, locate+1)
+      hour = as.numeric(gsub(":", "", hour))
+      
+      locate = regexpr("PM", date)
+      if (locate > 0) hour = hour + 12
+      
+      locate = regexpr("[+-][0-2][0-9]00", date)
+      if (locate < 0) offset = 0
+      else offset = as.numeric(substring(date, locate, locate + 2))
+      (hour - offset) %% 24
+    }
+  ,
+  multipartText =
+    function(msg)
+    {
+      if (is.null(msg$attach)) return(FALSE)
+      numAtt = nrow(msg$attach)
+      
+      types = 
+        length(grep("(html|plain|text)", msg$attach$aType)) > (numAtt/2)
+    }
+  ,
+  hasImages =
+    function(msg)
+    {
+      if (is.null(msg$attach)) return(FALSE)
+      
+      length(grep("^ *image", tolower(msg$attach$aType))) > 0
+    }
+  ,
+  isPGPsigned =
+    function(msg)
+    {
+      if (is.null(msg$attach)) return(FALSE)
+      
+      length(grep("pgp", tolower(msg$attach$aType))) > 0
+    },
+  perHTML =
+    function(msg)
+    {
+      if(! ("Content-Type" %in% names(msg$header))) return(0)
+      
+      el = tolower(msg$header["Content-Type"]) 
+      if (length(grep("html", el)) == 0) return(0)
+      
+      els = gsub("[[:space:]]", "", msg$body)
+      totchar = sum(nchar(els))
+      totplain = sum(nchar(gsub("<[^<]+>", "", els )))
+      100 * (totchar - totplain)/totchar
+    },
+  subSpamWords =
+    function(msg)
+    {
+      if("Subject" %in% names(msg$header))
+        length(grep(paste(SpamCheckWords, collapse = "|"), 
+                    tolower(msg$header["Subject"]))) > 0
+      else
+        NA
+    }
+  ,
+  subBlanks =
+    function(msg)
+    {
+      if("Subject" %in% names(msg$header)) {
+        x = msg$header["Subject"]
+        # should we count blank subject line as 0 or 1 or NA?
+        if (nchar(x) == 1) return(0)
+        else 100 *(1 - (nchar(gsub("[[:blank:]]", "", x))/nchar(x)))
+      } else NA
+    }
+  ,
+  noHost =
+    function(msg)
+    {
+      # Or use partial matching.
+      idx = pmatch("Message-", names(msg$header))
+      
+      if(is.na(idx)) return(NA)
+      
+      tmp = msg$header[idx]
+      return(length(grep(".*@[^[:space:]]+", tmp)) ==  0)
+    }
+  ,
+  numEnd =
+    function(msg)
+    {
+      # If we just do a grep("[0-9]@",  )
+      # we get matches on messages that have a From something like
+      # " \"marty66@aol.com\" <synjan@ecis.com>"
+      # and the marty66 is the "user's name" not the login
+      # So we can be more precise if we want.
+      x = names(msg$header)
+      if ( !( "From" %in% x) ) return(NA)
+      login = gsub("^.*<", "", msg$header["From"])
+      if ( is.null(login) ) 
+        login = gsub("^.*<", "", msg$header["X-From"])
+      if ( is.null(login) ) return(NA)
+      login = strsplit(login, "@")[[1]][1]
+      length(grep("[0-9]+$", login)) > 0
+    },
+  isYelling =
+    function(msg)
+    {
+      if ( "Subject" %in% names(msg$header) ) {
+        el = gsub("[^[:alpha:]]", "", msg$header["Subject"])
+        if (nchar(el) > 0) nchar(gsub("[A-Z]", "", el)) < 1
+        else FALSE
+      }
+      else
+        NA
+    },
+  forwards =
+    function(msg)
+    {
+      x = msg$body
+      if(length(x) == 0 || sum(nchar(x)) == 0)
+        return(NA)
+      
+      ans = length(grep("^[[:space:]]*>", x))
+      100 * ans / length(x)
+    },
+  isOrigMsg =
+    function(msg)
+    {
+      x = msg$body
+      if(length(x) == 0) return(NA)
+      
+      length(grep("^[^[:alpha:]]*original[^[:alpha:]]+message[^[:alpha:]]*$", 
+                  tolower(x) ) ) > 0
+    },
+  isDear =
+    function(msg)
+    {
+      x = msg$body
+      if(length(x) == 0) return(NA)
+      
+      length(grep("^[[:blank:]]*dear +(sir|madam)\\>", 
+                  tolower(x))) > 0
+    },
+  isWrote =
+    function(msg)
+    {
+      x = msg$body
+      if(length(x) == 0) return(NA)
+      
+      length(grep("(wrote|schrieb|ecrit|escribe):", tolower(x) )) > 0
+    },
+  avgWordLen =
+    function(msg)
+    {
+      txt = paste(msg$body, collapse = " ")
+      if(length(txt) == 0 || sum(nchar(txt)) == 0) return(0)
+      
+      txt = gsub("[^[:alpha:]]", " ", txt)
+      words = unlist(strsplit(txt, "[[:blank:]]+"))
+      wordLens = nchar(words)
+      mean(wordLens[ wordLens > 0 ])
+    }
+  ,
+  numDlr =
+    function(msg)
+    {
+      x = paste(msg$body, collapse = "")
+      if(length(x) == 0 || sum(nchar(x)) == 0)
+        return(NA)
+      
+      nchar(gsub("[^$]","", x))
+    }
+)
+
+
+SpamCheckWords =
+  c("viagra", "pounds", "free", "weight", "guarantee", "million", 
+    "dollars", "credit", "risk", "prescription", "generic", "drug",
+    "financial", "save", "dollar", "erotic", "million", "barrister",
+    "beneficiary", "easy", 
+    "money back", "money", "credit card")
+
+
+getMessageRecipients =
+  function(header)
+  {
+    c(if("To" %in% names(header))  header[["To"]] else character(0),
+      if("Cc" %in% names(header))  header[["Cc"]] else character(0),
+      if("Bcc" %in% names(header)) header[["Bcc"]] else character(0)
+    )
+  }
+
+
+# The following codes are from section 3.11
+
+library(rpart)
+numEmail = length(emailDF$isSpam)
+numSpam = sum(emailDF$isSpam)
+numHam = numEmail - numSpam
+
+# Function to replace logical variables with factor variables
+setupRpart = function(data) {
+  logicalVars = which(sapply(data, is.logical))
+  facVars = lapply(data[ , logicalVars], 
+                   function(x) {
+                     x = as.factor(x)
+                     levels(x) = c("F", "T")
+                     x
+                   })
+  cbind(facVars, data[ , - logicalVars])
+}
+
+# Process the email data frame.
+emailDFrp = setupRpart(emailDF)
+
+# Get spam and ham indices. These are the same samples chosen in section 3.6.1.
+set.seed(418910)
+testSpamIdx = sample(numSpam, size = floor(numSpam/3))
+testHamIdx = sample(numHam, size = floor(numHam/3))
+
+testDF = 
+  rbind( emailDFrp[ emailDFrp$isSpam == "T", ][testSpamIdx, ],
+         emailDFrp[emailDFrp$isSpam == "F", ][testHamIdx, ] )
+trainDF =
+  rbind( emailDFrp[emailDFrp$isSpam == "T", ][-testSpamIdx, ], 
+         emailDFrp[emailDFrp$isSpam == "F", ][-testHamIdx, ])
+```
+
+```{r}
+# the following codes are based on section 3.6
+MycomputeFreqs = function(capList, htmlList, spam) {
+    # create a matrix for spam, ham, and log odds
+    perTable = matrix(0.5, nrow = 4, ncol = 100, 
+                       dimnames = list(c("spam", "ham", 
+                                         "capLogOdds", 
+                                         "htmlLogOdds"),  1:100))
+    # bins
+    capList = lapply(capList, ceiling)
+    htmlList = lapply(htmlList, ceiling)
+    
+    capList = lapply(capList, function(x){if (x == 0){x=1} else{x=x}})
+    htmlList = lapply(htmlList, function(x){if (x == 0){x=1} else{x=x}})
+    
+    # For each spam message, add 1/2 to counts for words in message
+    counts.spam = table(unlist(capList[spam]))
+    perTable["spam", names(counts.spam)] = counts.spam + .5
+    
+    # Similarly for ham messages
+    counts.ham = table(unlist(capList[!spam]))  
+    perTable["ham", names(counts.ham)] = counts.ham + .5  
+    
+    
+    # Find the total number of spam and ham
+    numSpam = sum(spam)
+    numHam = length(spam) - numSpam
+    
+    # Prob(word|spam) and Prob(word | ham)
+    perTable["spam", ] = perTable["spam", ]/(numSpam + .5)
+    perTable["ham", ] = perTable["ham", ]/(numHam + .5)
+    
+    # log odds
+    perTable["capLogOdds", ] = 
+      log(perTable["spam",]) - log(perTable["ham", ])
+    
+    # reset spam and ham counts
+    perTable["spam",] = 0.5
+    perTable["ham",] = 0.5
+    
+     # For each spam message, add 1/2 to counts for words in message
+    counts.spam = table(htmlList[spam])
+    perTable["spam", names(counts.spam)] = counts.spam + .5
+    
+    # Similarly for ham messages
+    counts.ham = table(htmlList[!spam])  
+    perTable["ham", names(counts.ham)] = counts.ham + .5  
+    
+    # Prob(%|spam) and Prob(%|ham)
+    perTable["spam", ] = perTable["spam", ]/(numSpam + .5)
+    perTable["ham", ] = perTable["ham", ]/(numHam + .5)
+    
+    # log odds
+    perTable["htmlLogOdds", ] = 
+      log((perTable["spam", ])) - log((perTable["ham", ]))
+    
+    invisible(perTable)
+  }
+
+trainTable = MycomputeFreqs(trainDF$perCaps, trainDF$perHTML, trainIsSpam)
+```
+
+```{r}
+# the following codes are based on section 3.6
+# a function that will compute a log likelihood ratio statistic given cap and html percentages from a message and occurrence 
+# frequency table for a training set.
+MycomputeMsgLLR = function(capPer, htmlPer, freqTable = trainTable) 
+{
+  capPer = ceiling(capPer)
+  htmlPer = ceiling(htmlPer)
+  if (capPer == 0) capPer=1
+  if (htmlPer == 0) htmlPer=1
+  
+  sum(freqTable["capLogOdds", capPer]) +
+    sum(freqTable["htmlLogOdds", htmlPer])
+}
+# Apply the function to each message in the test set.
+testLLR = mapply(MycomputeMsgLLR, testDF$perCaps, testDF$perHTML)
+```
+
+To determine the best threshold for spam detection based on a Naive Bayes model using percentage of capital letters and percentage of HTML in a message body, check type I and type II error rates for different cutoffs. Using the functions (`typeIErrorRates` and `typeIIErrorRates`) from section 3.6 in class, the value 1.6309 is chosen to get a .1 Type I error rate.
+
+```{r, echo=FALSE}
+# the following codes are from section 3.6
+typeIErrorRates = 
+  function(llrVals, isSpam) 
+  {
+    # order the llr values and spam indicators
+    o = order(llrVals)
+    llrVals =  llrVals[o]
+    isSpam = isSpam[o]
+    
+    # get indices for ham 
+    idx = which(!isSpam)
+    N = length(idx)
+    # get the error rates and llr values for the ham indices
+    list(error = (N:1)/N, values = llrVals[idx])
+  }
+
+# Following is all setup to generate the plot in the text.
+# Start with a function for computing a range of Type II errors.
+# Note this differs from typeIErrorRates in two ways:
+#   - we now need the indices for the spam messages
+#   - the error rates increase with llr value instead of decreasing
+
+typeIIErrorRates = function(llrVals, isSpam) {
+  
+  o = order(llrVals)
+  llrVals =  llrVals[o]
+  isSpam = isSpam[o]
+  
+  
+  idx = which(isSpam)
+  N = length(idx)
+  list(error = (1:(N))/N, values = llrVals[idx])
+}  
+
+
+# Here the idea is to choose the tau value based on a specific Type I threshold.
+# The value is chosen to get a .1 Type I error rate and the corresponding Type II 
+# error rate is also obtained. 
+xI = typeIErrorRates(testLLR, testIsSpam)
+xII = typeIIErrorRates(testLLR, testIsSpam)
+tau01 = round(min(xI$values[xI$error <= 0.1]), digits = 4)
+t2 = max(xII$error[ xII$values < tau01 ])
+
+# library(RColorBrewer)
+# cols = brewer.pal(9, "Set1")[c(3, 4, 5)]
+# plot(xII$error ~ xII$values,  type = "l", col = cols[1], lwd = 1,
+#      xlim = c(-0.5, 5), ylim = c(0, 1),
+#      xlab = "Log Likelihood Ratio Values", ylab="Error Rate")
+# points(xI$error ~ xI$values, type = "l", col = cols[2], lwd = 1)
+# legend(x = 3, y = 0.4, fill = c(cols[2], cols[1]),
+#        legend = c("Classify Ham as Spam", 
+#                   "Classify Spam as Ham"), cex = 0.8,
+#        bty = "n")
+# abline(h=0.01, col ="grey", lwd = 1, lty = 2)
+# text(0, 0.05, pos = 4, "Type I Error = 0.1", col = cols[2])
+# 
+# mtext(tau01, side = 1, line = 0.5, at = tau01, col = cols[3])
+# segments(x0 = tau01, y0 = -.50, x1 = tau01, y1 = t2, 
+#          lwd = 1, col = "grey")
+# text(tau01 + 1, 0.6, pos = 4,
+#      paste("Type II Error = ", round(t2, digits = 2)), 
+#      col = cols[1])
+```
+
+**(4)**
+First, we run the model using all of the data shown in class. Then we subset the full data by excluding `easy_ham_2`, which is located at indices from 5052 to 6451 in `emailStruct` and follow the same procedure to get the other model. 
+
+```{r, echo=FALSE}
+# Fit the recursive partitioning model for spam as a function of all variables in the data frame.
+rpartFit = rpart(isSpam ~ ., data = trainDF, method = "class")
+```
+
+```{r, echo=FALSE}
+# exclude easy_ham_2
+emailDF2 = createDerivedDF(emailStruct[-(5052:6451)])
+
+# Process the email data frame.
+emailDFrp2 = setupRpart(emailDF2)
+
+numEmail2 = length(emailDF2$isSpam)
+numSpam2 = sum(emailDF2$isSpam)
+numHam2 = numEmail2 - numSpam2
+
+# Get spam and ham indices. These are the same samples chosen in section 3.6.1.
+set.seed(418910)
+testSpamIdx2 = sample(numSpam2, size = floor(numSpam2/3))
+testHamIdx2 = sample(numHam2, size = floor(numHam2/3))
+
+testDF2 = 
+  rbind( emailDFrp2[ emailDFrp2$isSpam == "T", ][testSpamIdx2, ],
+         emailDFrp2[emailDFrp2$isSpam == "F", ][testHamIdx2, ] )
+trainDF2 =
+  rbind( emailDFrp2[emailDFrp2$isSpam == "T", ][-testSpamIdx2, ], 
+         emailDFrp2[emailDFrp2$isSpam == "F", ][-testHamIdx2, ])
+
+# Fit the recursive partitioning model for spam as a function of all variables in the data frame.
+rpartFit2 = rpart(isSpam ~ ., data = trainDF2, method = "class")
+```
+
+Plot the decision tree to visualize the classification features used.
+
+```{r, echo=FALSE}
+library(rpart.plot)
+prp(rpartFit, extra = 1, main = "Spam Detection with Full Data")
+prp(rpartFit2, extra = 1, main = "Spam Detection with Subset Data")
+```
+
+To get a more accurate importance rank, we use `variable.importance` from rpart object. The variable importances for the model using full data are listed below.
+
+```{r,echo=FALSE}
+# original model
+rpartFit$variable.importance
+```
+
+The variable importances for the model using the subset of data are listed below.
+
+```{r,echo=FALSE}
+# new model
+rpartFit2$variable.importance
+```
+
+From the results we can see that both models' top 4 most important variables are the same, which are perCaps, bodyCharCt, numLines and perHTML. If we look at the top 10 most important variables, differences lie in that the original model includes multipartText, numAtt and numEnd while the new model includes numDlr, isWrote and subBlanks.
+
+The table below summarizes type I and type II error rates for each model performed on different dataset. Comparing the new model's performances on the subset of data and full data set, the new model performs slightly better on full data in terms of type I error rates. This is probably due to full data's larger sample size. Since the subset excludes easy_ham2, the ratio of classifying ham to spam will be larger than that for full data. In terms of type II error rates, there is no noticeable difference between using new model on full data set and on the subset of data set. Comparing two models' performances on full data set, the original model performs better in terms of type I error rates while the new model performs better in terms of type II error rates.
+
+```{r, echo=FALSE}
+# test on subset using new model
+pred1 = predict(rpartFit2,
+                newdata = testDF2[, names(testDF2) != "isSpam"],
+                type = "class")
+
+# test on full data using new model
+pred2 = predict(rpartFit2,
+                newdata = testDF[, names(testDF) != "isSpam"],
+                type = "class")
+
+# test on full using original model
+pred3 = predict(rpartFit,
+                newdata = testDF[, names(testDF) != "isSpam"],
+                type = "class")
+
+spam = testDF$isSpam == "T"
+numSpam = sum(spam)
+numHam = sum(!spam)
+
+spam2 = testDF2$isSpam == "T"
+numSpam2 = sum(spam2)
+numHam2 = sum(!spam2)
+
+typeI = c()
+typeII = c()
+
+typeI[1] = sum(pred1[!spam2] == "T") / numHam2
+typeI[2] = sum(pred2[!spam] == "T") / numHam
+typeI[3] = sum(pred3[!spam] == "T") / numHam
+
+typeII[1] = sum(pred1[spam2] == "F") / numSpam2
+typeII[2] = sum(pred2[spam] == "F") / numSpam
+typeII[3] = sum(pred3[spam] == "F") / numSpam
+
+ret = data.frame(typeI, typeII)
+rownames(ret) = c("New model on data subset", "New model on full data", "Original model on full data")
+colnames(ret) = c("Type I", "Type II")
+knitr::kable(ret, digits = 4, full_width = FALSE, booktabs = TRUE)
+```
